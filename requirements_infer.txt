@@ -1,0 +1,20 @@
+# ========== 基础数值计算 ==========
+numpy>=1.21,<2.0
+scipy>=1.7
+
+# ========== ONNX 推理 ==========
+onnxruntime-gpu>=1.14; platform_machine=="aarch64"
+onnxruntime>=1.14; platform_machine!="aarch64"
+
+# ========== 实时数据 & 串口 ==========
+pyserial>=3.5
+
+# ========== 配置文件 ==========
+pyyaml>=6.0
+
+# ========== Web Dashboard（FastAPI） ==========
+fastapi>=0.100
+uvicorn>=0.22
+
+# ========== 可选：性能 / 稳定性 ==========
+psutil>=5.9

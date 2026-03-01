@@ -1,0 +1,31 @@
+runtime:
+  device: "cuda"           # Nano上：cuda（前提是 onnxruntime-gpu 可用）；不行就改 cpu
+  window_sec: 0.5
+  hop_sec: 0.1
+
+  # 真实设备若不在 chunk 里带 fs，就在这里固定；如果你的 source 会写 chunk["fs_eeg/fs_ecg"]，也可以 auto
+  fs_eeg: 250.0            # 建议先固定，最稳
+  fs_ecg: 250.0
+  eeg_channels: "auto"     # 也可以直接写 14（如果你训练/模型固定 14）
+  eeg_channel_names: "auto"
+
+  #  真数据源：串口 0xFF + 12 bytes + 0xFE
+  source: "serial12hex"
+  source_args:
+    port: "/dev/ttyUSB0"   # Nano: /dev/ttyUSB0 or /dev/ttyACM0；Windows: COM3
+    baudrate: 115200
+    head: 255              # 0xFF
+    tail: 254              # 0xFE
+
+    # 采样率（如果协议本身不带时间戳/采样率，这里必须提供）
+    fs: 250.0
+
+    # 数据缩放：看你的 MCU 发的是原始 ADC 还是已经是 uV/mV
+    # 先都用 1.0，拿到设备后再根据量级调（否则 normalize 会救不了饱和/过小）
+    scale_eeg: 1.0
+    scale_ecg: 1.0
+
+    # 强烈建议加：如果你的协议是“12字节=8ch EEG + 4ch ECG(或其它)”
+    # 这两个字段要看你 rt.sources.serial12hex 是否支持；不支持也没关系，infer_realtime 会 pad/crop 对齐到模型C
+    eeg_channels: 8
+    ecg_channels: 4

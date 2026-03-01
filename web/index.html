@@ -1,0 +1,52 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Emotion Dashboard</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 24px; }
+    .card { border: 1px solid #ddd; border-radius: 12px; padding: 16px; max-width: 560px; }
+    .row { display:flex; justify-content:space-between; padding: 8px 0; border-bottom: 1px solid #f1f1f1; }
+    .row:last-child { border-bottom: none; }
+    .k { color:#666; }
+    .v { font-weight:700; }
+    .big { font-size: 28px; }
+    .sub { color:#777; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <h2>Real-time Emotion (EEG + ECG)</h2>
+  <div class="card">
+    <div class="row"><div class="k">Valence</div><div class="v big" id="valence">—</div></div>
+    <div class="row"><div class="k">Arousal</div><div class="v big" id="arousal">—</div></div>
+    <div class="row"><div class="k">Semantic</div><div class="v" id="semantic">Waiting...</div></div>
+    <div class="row"><div class="k">Confidence</div><div class="v" id="conf">0.00</div></div>
+    <div class="row"><div class="k">Model Label</div><div class="v" id="label">—</div></div>
+    <div class="row"><div class="k">Updated</div><div class="v" id="ts">—</div></div>
+    <div class="row"><div class="k">fs/ch</div><div class="v sub" id="meta">—</div></div>
+  </div>
+
+  <script>
+    function fmtTime(t) {
+      if (!t) return "—";
+      const d = new Date(t * 1000);
+      return d.toLocaleTimeString();
+    }
+
+    const ws = new WebSocket(`ws://${location.host}/ws`);
+    ws.onopen = () => ws.send("hi");
+    ws.onmessage = (ev) => {
+      const x = JSON.parse(ev.data);
+      document.getElementById("valence").textContent = x.valence;
+      document.getElementById("arousal").textContent = x.arousal;
+      document.getElementById("semantic").textContent = x.semantic;
+      document.getElementById("conf").textContent = (x.confidence ?? 0).toFixed(3);
+      document.getElementById("label").textContent = x.label;
+      document.getElementById("ts").textContent = fmtTime(x.timestamp);
+      document.getElementById("meta").textContent =
+        `EEG: ${x.eeg_ch ?? "?"}ch@${x.fs_eeg ?? "?"}Hz | ECG: ${x.ecg_ch ?? "?"}ch@${x.fs_ecg ?? "?"}Hz`;
+    };
+  </script>
+</body>
+</html>
