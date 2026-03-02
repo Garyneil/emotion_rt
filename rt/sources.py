@@ -2,24 +2,39 @@ import json
 import time
 import socket
 import numpy as np
+from typing import Any, Dict, Optional
 
+
+# ---------------------------
+# Base class
+# ---------------------------
 class BaseSource:
     name = "base"
+
     def probe(self) -> bool:
         return False
-    def read_chunk(self) -> dict:
+
+    def read_chunk(self) -> Dict[str, Any]:
         raise NotImplementedError
 
+    def close(self):
+        pass
+
+
+# ---------------------------
+# LSL
+# ---------------------------
 class LSLSource(BaseSource):
     name = "lsl"
-    def __init__(self, stream_name=None):
+
+    def __init__(self, stream_name: Optional[str] = None):
         self.stream_name = stream_name
         self.inlet = None
 
     def probe(self) -> bool:
         try:
             from pylsl import resolve_stream, StreamInlet
-            streams = resolve_stream('type', 'EEG', timeout=0.5)
+            streams = resolve_stream("type", "EEG", timeout=0.5)
             if not streams:
                 return False
             self.inlet = StreamInlet(streams[0])
@@ -27,27 +42,43 @@ class LSLSource(BaseSource):
         except Exception:
             return False
 
-    def read_chunk(self) -> dict:
-        t_list, x_list, arrival = [], [], []
-        t0 = time.time()
-        for _ in range(64):
-            sample, ts = self.inlet.pull_sample(timeout=0.01)
-            if sample is None:
-                break
-            t_list.append(ts)
-            x_list.append(sample)
-            arrival.append(time.time() - t0 + t0)
-        eeg = np.asarray(x_list, dtype=np.float32) if x_list else None
-        if eeg is not None and eeg.ndim == 2:
-            return {"t": np.asarray(t_list, dtype=np.float64),
-                    "eeg": eeg, "ecg": None,
-                    "arrival_t": np.asarray(arrival, dtype=np.float64)}
-        return {"t": None, "eeg": None, "ecg": None, "arrival_t": None}
+    def read_chunk(self) -> Dict[str, Any]:
+        try:
+            t_list, x_list, arrival = [], [], []
+            t0 = time.time()
+            for _ in range(64):
+                sample, ts = self.inlet.pull_sample(timeout=0.01)
+                if sample is None:
+                    break
+                t_list.append(ts)
+                x_list.append(sample)
+                arrival.append(time.time() - t0 + t0)
 
+            eeg = np.asarray(x_list, dtype=np.float32) if x_list else None
+            if eeg is not None and eeg.ndim == 2:
+                t = np.asarray(t_list, dtype=np.float64)
+                arrival_t = np.asarray(arrival, dtype=np.float64)
+                return {"t": t, "eeg": eeg, "ecg": None, "arrival_t": arrival_t}
+
+            return {"t": None, "eeg": None, "ecg": None, "arrival_t": None}
+        except Exception:
+            return {"t": None, "eeg": None, "ecg": None, "arrival_t": None}
+
+    def close(self):
+        try:
+            self.inlet = None
+        except Exception:
+            pass
+
+
+# ---------------------------
+# UDP (JSON payload)
+# ---------------------------
 class UDPSource(BaseSource):
     name = "udp"
-    def __init__(self, host="0.0.0.0", port=9000, buf=65535):
-        self.host, self.port, self.buf = host, port, buf
+
+    def __init__(self, host: str = "0.0.0.0", port: int = 9000, buf: int = 65535):
+        self.host, self.port, self.buf = host, int(port), int(buf)
         self.sock = None
 
     def probe(self) -> bool:
@@ -59,137 +90,127 @@ class UDPSource(BaseSource):
         except Exception:
             return False
 
-    def read_chunk(self) -> dict:
+    def read_chunk(self) -> Dict[str, Any]:
         try:
             data, _ = self.sock.recvfrom(self.buf)
             now = time.time()
             obj = json.loads(data.decode("utf-8"))
+
             eeg = np.asarray(obj.get("eeg"), dtype=np.float32) if obj.get("eeg") is not None else None
             ecg = np.asarray(obj.get("ecg"), dtype=np.float32) if obj.get("ecg") is not None else None
             t = np.asarray(obj.get("t"), dtype=np.float64) if obj.get("t") is not None else None
             arrival_t = np.full((len(t),), now, dtype=np.float64) if t is not None else None
+
             return {"t": t, "eeg": eeg, "ecg": ecg, "arrival_t": arrival_t}
         except Exception:
             return {"t": None, "eeg": None, "ecg": None, "arrival_t": None}
 
+    def close(self):
+        try:
+            if self.sock is not None:
+                self.sock.close()
+        except Exception:
+            pass
+        self.sock = None
+
+
+# ---------------------------
+# Serial (line-based JSON)
+# ---------------------------
 class SerialSource(BaseSource):
     name = "serial"
-    def __init__(self, port="/dev/ttyUSB0", baud=115200):
-        self.port, self.baud = port, baud
+
+    def __init__(self, port: str = "/dev/ttyUSB0", baud: int = 115200, timeout: float = 0.2):
+        self.port = port
+        self.baud = int(baud)
+        self.timeout = float(timeout)
         self.ser = None
 
     def probe(self) -> bool:
         try:
             import serial
-            self.ser = serial.Serial(self.port, self.baud, timeout=0.2)
+            self.ser = serial.Serial(self.port, self.baud, timeout=self.timeout)
             return True
         except Exception:
             return False
 
-    def read_chunk(self) -> dict:
+    def read_chunk(self) -> Dict[str, Any]:
         try:
-            line = self.ser.readline().decode("utf-8", errors="ignore").strip()
+            line = self.ser.readline()
             if not line:
                 return {"t": None, "eeg": None, "ecg": None, "arrival_t": None}
-            obj = json.loads(line)
+
+            s = line.decode("utf-8", errors="ignore").strip()
+            if not s:
+                return {"t": None, "eeg": None, "ecg": None, "arrival_t": None}
+
+            obj = json.loads(s)
             now = time.time()
+
             t = np.asarray([obj.get("t", now)], dtype=np.float64)
             eeg = np.asarray([obj["eeg"]], dtype=np.float32) if "eeg" in obj else None
             ecg = np.asarray([obj["ecg"]], dtype=np.float32) if "ecg" in obj else None
             arrival_t = np.asarray([now], dtype=np.float64)
+
             return {"t": t, "eeg": eeg, "ecg": ecg, "arrival_t": arrival_t}
         except Exception:
             return {"t": None, "eeg": None, "ecg": None, "arrival_t": None}
 
-# def build_source_auto(cfg: dict) -> BaseSource:
-#     source_name = cfg.get("source", "auto")
-#     source_args = cfg.get("source_args", {}) or {}
-#
-#     # ===== 1️⃣ 显式指定 source（不走 auto）=====
-#     if source_name == "serial12hex":
-#         print("[Source] using Serial12HexSource")
-#         return Serial12HexSource(**source_args)
-#
-#     if source_name == "udp":
-#         print("[Source] using UDPSource")
-#         return UDPSource(**source_args)
-#
-#     if source_name == "serial":
-#         print("[Source] using SerialSource")
-#         return SerialSource(**source_args)
-#
-#     if source_name == "lsl":
-#         print("[Source] using LSLSource")
-#         return LSLSource()
-#
-#     # ===== 2️ auto 探测模式=====
-#     candidates = [
-#         LSLSource(),
-#         UDPSource(**source_args),
-#         SerialSource(**source_args),
-#     ]
-#
-#     for s in candidates:
-#         if s.probe():
-#             print(f"[AutoSource] selected: {s.name}")
-#             return s
-#
-#     raise RuntimeError(
-#         "No available source found. "
-#         "Please specify runtime.source and runtime.source_args."
-#     )
-
-#测试
-def build_source_auto(cfg: dict) -> BaseSource:
-    source_name = cfg.get("source", "auto")
-    source_args = cfg.get("source_args", {}) or {}
-
-    # ✅ 手动指定：sim
-    if source_name == "sim":
-        s = SimSource(**source_args)
-        print(f"[Source] selected: {s.name}")
-        return s
-
-    # （可选）你之前做的 serial12hex 也建议在这儿手动分支
-    # if source_name == "serial12hex":
-    #     s = Serial12HexSource(**source_args)
-    #     print(f"[Source] selected: {s.name}")
-    #     return s
-
-    # ✅ 保留原 auto 探测逻辑
-    candidates = [
-        LSLSource(),
-        UDPSource(**source_args) if source_args else UDPSource(),
-        SerialSource(**source_args) if source_args else SerialSource(),
-    ]
-    for s in candidates:
-        if s.probe():
-            print(f"[AutoSource] selected: {s.name}")
-            return s
-    raise RuntimeError("No available source found (lsl/udp/serial). Provide runtime.source + source_args.")
+    def close(self):
+        try:
+            if self.ser is not None:
+                self.ser.close()
+        except Exception:
+            pass
+        self.ser = None
 
 
-class Serial12HexSource:
+# ---------------------------
+# Serial12Hex (0xFF + 12 bytes + 0xFE)
+# ---------------------------
+class Serial12HexSource(BaseSource):
+    name = "serial12hex"
+
     def __init__(
         self,
-        port="/dev/ttyUSB0",
-        baudrate=115200,
-        head=0xFF,
-        tail=0xFE,
-        fs=250.0,
-        scale_eeg=1.0,
-        scale_ecg=1.0,
-        timeout=0.2,
+        port: str = "/dev/ttyUSB0",
+        baudrate: int = 115200,
+        head: int = 0xFF,
+        tail: int = 0xFE,
+        fs: float = 250.0,
+        scale_eeg: float = 1.0,
+        scale_ecg: float = 1.0,
+        timeout: float = 0.2,
+        eeg_bytes: int = 8,   # 默认 12 字节里前 8 字节当 EEG
+        ecg_bytes: int = 4,   # 默认后 4 字节当 ECG
     ):
         import serial
-        self.ser = serial.Serial(port=port, baudrate=baudrate, timeout=timeout)
+
+        self.port = port
+        self.baudrate = int(baudrate)
+        self.timeout = float(timeout)
+
+        self.ser = serial.Serial(port=self.port, baudrate=self.baudrate, timeout=self.timeout)
+
         self.head = head & 0xFF
         self.tail = tail & 0xFF
         self.fs = float(fs)
         self.scale_eeg = float(scale_eeg)
         self.scale_ecg = float(scale_ecg)
 
-    def _sync_to_head(self):
+        self.eeg_bytes = int(eeg_bytes)
+        self.ecg_bytes = int(ecg_bytes)
+        if self.eeg_bytes + self.ecg_bytes != 12:
+            raise ValueError(f"eeg_bytes + ecg_bytes must be 12, got {self.eeg_bytes}+{self.ecg_bytes}")
+
+    def probe(self) -> bool:
+        # 端口能打开就算可用；读不到数据不在 probe 阶段判死
+        try:
+            return self.ser is not None and self.ser.is_open
+        except Exception:
+            return False
+
+    def _sync_to_head(self) -> bool:
         while True:
             b = self.ser.read(1)
             if not b:
@@ -197,7 +218,7 @@ class Serial12HexSource:
             if b[0] == self.head:
                 return True
 
-    def _read_exact(self, n):
+    def _read_exact(self, n: int) -> bytes:
         buf = b""
         while len(buf) < n:
             chunk = self.ser.read(n - len(buf))
@@ -206,39 +227,53 @@ class Serial12HexSource:
             buf += chunk
         return buf
 
-    def read_chunk(self):
-        if not self._sync_to_head():
-            return None
+    def read_chunk(self) -> Dict[str, Any]:
+        try:
+            if not self._sync_to_head():
+                return {"t": None, "eeg": None, "ecg": None, "arrival_t": None}
 
-        payload = self._read_exact(13)  # 12 data + 1 tail
-        if len(payload) != 13:
-            return None
+            payload = self._read_exact(13)  # 12 data + 1 tail
+            if len(payload) != 13:
+                return {"t": None, "eeg": None, "ecg": None, "arrival_t": None}
 
-        data = payload[:12]
-        tail = payload[12]
-        if tail != self.tail:
-            return None
+            data = payload[:12]
+            tail = payload[12]
+            if tail != self.tail:
+                return {"t": None, "eeg": None, "ecg": None, "arrival_t": None}
 
-        vals = np.frombuffer(data, dtype=np.uint8).astype(np.float32)
+            vals = np.frombuffer(data, dtype=np.uint8).astype(np.float32)
 
-        eeg = (vals[:8] * self.scale_eeg)[None, :]
-        ecg = (vals[8:] * self.scale_ecg)[None, :]
-        t = np.array([time.time()], dtype=np.float64)
+            eeg_raw = vals[: self.eeg_bytes] * self.scale_eeg
+            ecg_raw = vals[self.eeg_bytes : self.eeg_bytes + self.ecg_bytes] * self.scale_ecg
 
-        return {
-            "t": t,
-            "eeg": eeg,
-            "ecg": ecg,
-            "fs_eeg": self.fs,
-            "fs_ecg": self.fs,
-            "eeg_channels": 8,
-        }
+            # 统一成 [1, C] 形状
+            eeg = eeg_raw[None, :]
+            ecg = ecg_raw[None, :]
 
-#测试
+            now = time.time()
+            t = np.asarray([now], dtype=np.float64)
+            arrival_t = np.asarray([now], dtype=np.float64)
+
+            return {"t": t, "eeg": eeg, "ecg": ecg, "arrival_t": arrival_t}
+        except Exception:
+            return {"t": None, "eeg": None, "ecg": None, "arrival_t": None}
+
+    def close(self):
+        try:
+            if self.ser is not None:
+                self.ser.close()
+        except Exception:
+            pass
+        self.ser = None
+
+
+# ---------------------------
+# Sim source (optional)
+# ---------------------------
 class SimSource(BaseSource):
     name = "sim"
 
-    def __init__(self, fs=250.0, eeg_channels=8, ecg_channels=4, noise=5.0, seed=0):
+    def __init__(self, fs: float = 250.0, eeg_channels: int = 8, ecg_channels: int = 4, noise: float = 5.0, seed: int = 0):
         self.fs = float(fs)
         self.eeg_channels = int(eeg_channels)
         self.ecg_channels = int(ecg_channels)
@@ -248,31 +283,98 @@ class SimSource(BaseSource):
         self._n = 0
 
     def probe(self) -> bool:
-        # 模拟源永远可用
         return True
 
-    def read_chunk(self):
-        # 每次吐 1 个采样点（[1, C]），和你串口源一致
-        t = np.array([self._t0 + self._n / self.fs], dtype=np.float64)
+    def read_chunk(self) -> Dict[str, Any]:
+        t = np.asarray([self._t0 + self._n / self.fs], dtype=np.float64)
         self._n += 1
 
-        # 你导师协议是 0~255 的“十进制值”，我们也模拟成这个范围
         eeg = self.rng.integers(0, 256, size=(1, self.eeg_channels), dtype=np.int32).astype(np.float32)
         ecg = self.rng.integers(0, 256, size=(1, self.ecg_channels), dtype=np.int32).astype(np.float32)
 
-        # 加点噪声让它更像真实波动（可选）
         if self.noise > 0:
             eeg += self.rng.normal(0, self.noise, size=eeg.shape).astype(np.float32)
             ecg += self.rng.normal(0, self.noise, size=ecg.shape).astype(np.float32)
 
-        return {
-            "t": t,
-            "eeg": eeg,
-            "ecg": ecg,
-            "fs_eeg": self.fs,
-            "fs_ecg": self.fs,
-            "eeg_channels": self.eeg_channels,
-        }
+        now = time.time()
+        arrival_t = np.asarray([now], dtype=np.float64)
+        return {"t": t, "eeg": eeg, "ecg": ecg, "arrival_t": arrival_t}
 
-    def close(self):
-        pass
+
+# ---------------------------
+# Helper: filter kwargs by allowed keys
+# ---------------------------
+def _pick(d: Dict[str, Any], allowed: set) -> Dict[str, Any]:
+    return {k: v for k, v in (d or {}).items() if k in allowed}
+
+
+# ---------------------------
+# Source builder
+# ---------------------------
+def build_source_auto(cfg: Dict[str, Any]) -> BaseSource:
+    """
+    Rules:
+    1) If cfg['source'] is explicitly specified (not 'auto'), we STRICTLY use it.
+    2) If cfg['source'] == 'auto' (or missing), we probe candidates in order.
+    3) When passing source_args, we filter keys to avoid "unexpected keyword" errors.
+    """
+    source_name = (cfg.get("source") or "auto").lower()
+    source_args = cfg.get("source_args", {}) or {}
+
+    # ---- Explicit mode: do NOT probe other sources
+    if source_name in ("serial12hex", "serial_12hex", "serial12"):
+        args = _pick(source_args, {"port", "baudrate", "head", "tail", "fs", "scale_eeg", "scale_ecg", "timeout", "eeg_bytes", "ecg_bytes"})
+        s = Serial12HexSource(**args)
+        print(f"[Source] selected: {s.name}")
+        return s
+
+    if source_name == "udp":
+        args = _pick(source_args, {"host", "port", "buf"})
+        s = UDPSource(**args)
+        if not s.probe():
+            raise RuntimeError(f"UDPSource not available on {args.get('host','0.0.0.0')}:{args.get('port',9000)}")
+        print(f"[Source] selected: {s.name}")
+        return s
+
+    if source_name == "serial":
+        # allow both baud and baudrate from config
+        args = dict(source_args)
+        if "baudrate" in args and "baud" not in args:
+            args["baud"] = args["baudrate"]
+        args = _pick(args, {"port", "baud", "timeout"})
+        s = SerialSource(**args)
+        if not s.probe():
+            raise RuntimeError(f"SerialSource not available on {args.get('port','/dev/ttyUSB0')}")
+        print(f"[Source] selected: {s.name}")
+        return s
+
+    if source_name == "lsl":
+        s = LSLSource()
+        if not s.probe():
+            raise RuntimeError("LSLSource not available (no EEG stream found)")
+        print(f"[Source] selected: {s.name}")
+        return s
+
+    if source_name == "sim":
+        args = _pick(source_args, {"fs", "eeg_channels", "ecg_channels", "noise", "seed"})
+        s = SimSource(**args)
+        print(f"[Source] selected: {s.name}")
+        return s
+
+    # ---- Auto probe mode
+    if source_name not in ("auto", ""):
+        raise ValueError(f"Unknown source '{source_name}'. Valid: auto/udp/serial/serial12hex/lsl/sim")
+
+    candidates = [
+        LSLSource(),
+        UDPSource(**_pick(source_args, {"host", "port", "buf"})),
+        Serial12HexSource(**_pick(source_args, {"port", "baudrate", "head", "tail", "fs", "scale_eeg", "scale_ecg", "timeout", "eeg_bytes", "ecg_bytes"})),
+        SerialSource(**_pick({**source_args, **({"baud": source_args.get("baudrate")} if "baudrate" in source_args else {})}, {"port", "baud", "timeout"})),
+    ]
+
+    for s in candidates:
+        if s.probe():
+            print(f"[AutoSource] selected: {s.name}")
+            return s
+
+    raise RuntimeError("No available source found (lsl/udp/serial12hex/serial). Please set runtime.source + source_args.")
